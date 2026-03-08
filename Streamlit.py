@@ -30,14 +30,16 @@ if not st.session_state.auth:
     st.stop()
 
 # ===============================
-# 📊 DONNÉES – FICHIER LOCAL
+# 📊 DONNÉES – GOOGLE SHEETS
 # ===============================
-FILE_PATH = r"C:\Users\kimba\Documents\Données_corrigees.xlsx"
+
+DATA_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSnZAx_1R_KYMsasRquY0Ryue3j-vGERgij_3cHbdbPHdzR4X-gh77WQ69y2P0I_Q/pub?output=csv"
 
 @st.cache_data
 def load_data():
-    df = pd.read_excel(FILE_PATH)
+    df = pd.read_csv(DATA_URL)
 
+    # conversion date
     df["TxnDate"] = pd.to_datetime(df["TxnDate"], errors="coerce")
 
     return df
