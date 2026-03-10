@@ -46,6 +46,9 @@ def load_data():
 
 df = load_data()
 
+# création colonne mois
+df["YearMonth"] = df["TxnDate"].dt.to_period("M")
+
 # ===============================
 # EXCLUSION EMPLOYÉS DIGIPAY
 # ===============================
@@ -126,13 +129,20 @@ def table_clients(df, date_min=None):
     if date_min is not None:
         df = df[df["TxnDate"] >= date_min]
 
-    return (
-        df.groupby(["Sender Name", "Agence"])
-        .agg(Nombre_Envois=("TxnDate","count"))
+    table = (
+        df.groupby(["Sender Name","Agence"])
+        .agg(
+            Nombre_Envois=("TxnDate","count"),
+            Mois_Actifs=("YearMonth","nunique")
+        )
         .reset_index()
-        .sort_values("Nombre_Envois", ascending=False)
     )
 
+    table["Frequence"] = (
+        table["Nombre_Envois"] / table["Mois_Actifs"]
+    ).round(2)
+
+    return table.sort_values("Nombre_Envois", ascending=False)
 # ===============================
 # LISTES CLIENTS
 # ===============================
@@ -149,20 +159,74 @@ st.subheader("🏆 Top clients")
 st.dataframe(table_clients(df).head(50), use_container_width=True)
 
 # ===============================
-# CLIENTS ACTIFS CHAQUE MOIS
+# CLIENTS ACTIFS CHAQUE MOIS + FREQUENCE
 # ===============================
+
 df["YearMonth"] = df["TxnDate"].dt.to_period("M")
 
+st.subheader("📆 Clients actifs chaque mois")
+
 clients_12_mois = (
-    df.groupby(["Sender Name","Agence"])["YearMonth"]
-    .nunique()
-    .reset_index(name="Mois_Actifs")
+    df.groupby(["Sender Name","Agence"])
+    .agg(
+        Transactions=("TxnDate","count"),
+        Mois_Actifs=("YearMonth","nunique")
+    )
+    .reset_index()
 )
 
+# fréquence moyenne des transactions par mois actif
+clients_12_mois["Frequence_Mensuelle"] = (
+    clients_12_mois["Transactions"] /
+    clients_12_mois["Mois_Actifs"]
+).round(2)
+
+# clients présents tous les mois
 clients_12_mois = clients_12_mois[clients_12_mois["Mois_Actifs"] >= 12]
 
-st.subheader("📆 Clients actifs chaque mois")
 st.dataframe(clients_12_mois, use_container_width=True)
+
+
+
+# ===============================
+# 🔁 CLIENTS RÉCURRENTS IMPORTANTS
+# ===============================
+
+st.subheader("🔁 Clients fort volume")
+
+clients_gros = (
+    df.groupby("Sender Name")
+    .agg(
+        Transactions=("TxnDate","count"),
+        Derniere_Transaction=("TxnDate","max"),
+        Mois_Actifs=("YearMonth","nunique")
+    )
+    .reset_index()
+)
+
+# fréquence moyenne mensuelle
+clients_gros["Frequence_Mensuelle"] = (
+    clients_gros["Transactions"] /
+    clients_gros["Mois_Actifs"]
+).round(2)
+
+# estimation prochaine transaction
+clients_gros["Prochaine_Transaction_Possible"] = (
+    clients_gros["Derniere_Transaction"] +
+    pd.Timedelta(days=30)
+)
+
+# trier par nombre de transactions
+clients_gros = clients_gros.sort_values(
+    "Transactions",
+    ascending=False
+)
+
+# garder les 30 clients les plus actifs
+clients_gros = clients_gros.head(30)
+
+st.dataframe(clients_gros, use_container_width=True)
+
 
 # ===============================
 # CLIENTS 1 TRANSACTION
@@ -179,15 +243,44 @@ st.dataframe(
 # ===============================
 # PROJECTION CLIENTS
 # ===============================
+
 st.subheader("🔮 Projection clients probables")
 
-clients_actifs_90 = df[df["TxnDate"] >= date_max - pd.Timedelta(days=90)]["Sender Name"].unique()
+clients_90 = df[df["TxnDate"] >= date_max - pd.Timedelta(days=90)]
 
-clients_probables = pd.DataFrame({
-    "Sender Name": list(set(clients_actifs_90))
-})
+projection = (
+    clients_90.groupby("Sender Name")
+    .agg(
+        Transactions_90j=("TxnDate","count"),
+        Derniere_Transaction=("TxnDate","max"),
+        Mois_Actifs=("YearMonth","nunique")
+    )
+    .reset_index()
+)
 
-st.dataframe(clients_probables, use_container_width=True)
+# fréquence moyenne
+projection["Frequence_Mensuelle"] = (
+    projection["Transactions_90j"] /
+    projection["Mois_Actifs"]
+).round(2)
+
+# estimation transactions mois prochain
+projection["Transactions_Prevues_Mars"] = (
+    projection["Frequence_Mensuelle"]
+).round()
+
+# estimation date retour
+projection["Retour_Potentiel"] = (
+    projection["Derniere_Transaction"] +
+    pd.Timedelta(days=30)
+)
+
+projection = projection.sort_values(
+    "Frequence_Mensuelle",
+    ascending=False
+)
+
+st.dataframe(projection, use_container_width=True)
 
 # ===============================
 # MOTIFS ENVOI
@@ -226,22 +319,13 @@ st.plotly_chart(fig_motif, use_container_width=True)
 # ===============================
 st.subheader("🧠 Segmentation clients – Clustering K-Means")
 
+# données clustering
 cluster_df = table_clients(df)
 
-mois_actifs = (
-    df.groupby("Sender Name")["YearMonth"]
-    .nunique()
-    .reset_index(name="Mois_Actifs")
-)
-
-cluster_df = cluster_df.merge(
-    mois_actifs,
-    on="Sender Name",
-    how="left"
-)
-
+# variables utilisées pour le ML
 X = cluster_df[["Nombre_Envois","Mois_Actifs"]].fillna(0)
 
+# modèle KMeans
 kmeans = KMeans(
     n_clusters=3,
     random_state=42,
@@ -250,6 +334,7 @@ kmeans = KMeans(
 
 cluster_df["Cluster"] = kmeans.fit_predict(X)
 
+# graphique
 fig = px.scatter(
     cluster_df,
     x="Nombre_Envois",
@@ -260,6 +345,7 @@ fig = px.scatter(
 )
 
 st.plotly_chart(fig, use_container_width=True)
+
 
 # ===============================
 # ÉVOLUTION MENSUELLE
@@ -408,15 +494,26 @@ st.divider()
 
 st.markdown("### 🔻 Funnel clients – Février 2026")
 
-nouveaux_clients_set = set(nouveaux_clients_list)
-nouveaux_actifs = nouveaux_clients_set.intersection(clients_fevrier)
+# transactions des nouveaux clients
+tx_new_clients = (
+    df_fev[df_fev["Sender Name"].isin(nouveaux_clients_list)]
+    .groupby("Sender Name")
+    .size()
+    .reset_index(name="Nombre_Envois")
+)
 
+# nouveaux clients actifs (>=2 transactions)
+nouveaux_actifs = tx_new_clients[
+    tx_new_clients["Nombre_Envois"] >= 2
+]["Sender Name"]
+
+# construction funnel
 funnel_fev = pd.DataFrame({
     "Étape":[
         "Clients Janvier",
         "Revenus en Février",
         "Nouveaux clients acquis",
-        "Nouveaux clients restés actifs"
+        "Nouveaux clients actifs (≥2 tx)"
     ],
     "Clients":[
         len(clients_janvier),
@@ -449,7 +546,7 @@ if nouveaux_clients > 0:
 else:
     activation_rate = 0
 
-st.metric("🔥 Activation nouveaux clients", f"{activation_rate:.1f}%")
+st.metric("🔥 Activation nouveaux clients (≥2 transactions)", f"{activation_rate:.1f}%")
 
 st.divider()
 
@@ -549,6 +646,55 @@ top_clients = (
 )
 
 st.dataframe(top_clients.head(20), use_container_width=True)
+
+
+# ===============================
+# SEGMENTATION FIDELITE CLIENTS
+# ===============================
+
+st.subheader("🎯 Segmentation fidélité des clients")
+
+freq_clients = (
+    df.groupby("Sender Name")
+    .agg(
+        Transactions=("TxnDate","count"),
+        Mois_Actifs=("YearMonth","nunique")
+    )
+    .reset_index()
+)
+
+freq_clients["Frequence_Mensuelle"] = (
+    freq_clients["Transactions"] /
+    freq_clients["Mois_Actifs"]
+).round(2)
+
+# segmentation fidélité
+freq_clients["Segment"] = pd.cut(
+    freq_clients["Mois_Actifs"],
+    bins=[0,3,9,12],
+    labels=["Occasionnel","Fidèle","Très fidèle"]
+)
+
+segments = (
+    freq_clients.groupby("Segment")
+    .size()
+    .reset_index(name="Clients")
+)
+
+fig_seg = px.pie(
+    segments,
+    names="Segment",
+    values="Clients",
+    hole=0.4,
+    template="plotly_dark",
+    title="Segmentation fidélité clients"
+)
+
+fig_seg.update_layout(title_x=0.5)
+
+st.plotly_chart(fig_seg, use_container_width=True)
+
+
 
 
 # ===============================
